@@ -1,7 +1,7 @@
 #include "Uc8253X3Driver.h"
 
-
 #include <BoardConfig.h>
+#include <Uc8253X3Lut16.h>
 
 #include "../lut/Uc8253X3Luts.h"
 #include "../lut/UltraChipDirectGrayLuts.h"
@@ -38,10 +38,10 @@ constexpr uint8_t CMD_PARTIAL_OUT = 0x92;
 }  // namespace
 
 const Uc8253X3Config& uc8253X3DefaultConfig() {
-  static constexpr Uc8253LutBank directGray = {
-      kUltraChipDirectGray[0], kUltraChipDirectGray[4], kUltraChipDirectGray[2],
-      kUltraChipDirectGray[3], kUltraChipDirectGray[1]};
-  static const Uc8253X3Config cfg = {
+  static constexpr Uc8253LutBank directGray = {kUltraChipDirectGray[0], kUltraChipDirectGray[4],
+                                               kUltraChipDirectGray[2], kUltraChipDirectGray[3],
+                                               kUltraChipDirectGray[1]};
+  static constexpr Uc8253X3Config cfg = {
       {lut_x3_vcom_normal, lut_x3_ww_normal, lut_x3_bw_normal, lut_x3_wb_normal, lut_x3_bb_normal},
       {lut_x3_vcom_half, lut_x3_ww_half, lut_x3_bw_half, lut_x3_wb_half, lut_x3_bb_half},
       {lut_x3_vcom_fast, lut_x3_ww_fast, lut_x3_bw_fast, lut_x3_wb_fast, lut_x3_bb_fast},
@@ -51,6 +51,18 @@ const Uc8253X3Config& uc8253X3DefaultConfig() {
        lut_x3_bb_aa_pre_bw_mid},
       42,  // controller accepts 42 bytes of each 43-byte array
       &directGray,
+      {
+          {x3_lut16::kLut16PreBwMid_vcom, x3_lut16::kLut16PreBwMid_ww, x3_lut16::kLut16PreBwMid_bw,
+           x3_lut16::kLut16PreBwMid_wb, x3_lut16::kLut16PreBwMid_bb},
+          {x3_lut16::kLut16Pass1Coarse_vcom, x3_lut16::kLut16Pass1Coarse_ww, x3_lut16::kLut16Pass1Coarse_bw,
+           x3_lut16::kLut16Pass1Coarse_wb, x3_lut16::kLut16Pass1Coarse_bb},
+          {x3_lut16::kLut16Pass2Fine_vcom, x3_lut16::kLut16Pass2Fine_ww, x3_lut16::kLut16Pass2Fine_bw,
+           x3_lut16::kLut16Pass2Fine_wb, x3_lut16::kLut16Pass2Fine_bb},
+          x3_lut16::kPllBase,
+          x3_lut16::kPllPass1Coarse,
+          x3_lut16::kPllPass2Fine,
+          x3_lut16::kPwrPass2Fine[3],
+      },
   };
   return cfg;
 }
@@ -85,8 +97,7 @@ void Uc8253X3Driver::loadBankCdi(EpdBus& bus, uint8_t cdi0, uint8_t cdi1, const 
   loadBank(bus, bank);
 }
 
-void Uc8253X3Driver::triggerRefresh(EpdBus &bus, bool turnOff,
-                                    const char *label) {
+void Uc8253X3Driver::triggerRefresh(EpdBus& bus, bool turnOff, const char* label) {
   if (!_isScreenOn) {
     bus.cmd(CMD_POWER_ON);
     bus.waitBusy(" X3_PON");
@@ -101,13 +112,12 @@ void Uc8253X3Driver::triggerRefresh(EpdBus &bus, bool turnOff,
   }
 }
 
-void Uc8253X3Driver::grayWindowIn(EpdBus &bus) {
+void Uc8253X3Driver::grayWindowIn(EpdBus& bus) {
   const uint16_t xEnd = _w - 1;
   const uint16_t yEnd = _h - 1;
-  const uint8_t window[9] = {
-      0, 0, static_cast<uint8_t>(xEnd >> 8), static_cast<uint8_t>(xEnd),
-      0, 0, static_cast<uint8_t>(yEnd >> 8), static_cast<uint8_t>(yEnd),
-      1};
+  const uint8_t window[9] = {0, 0, static_cast<uint8_t>(xEnd >> 8), static_cast<uint8_t>(xEnd),
+                             0, 0, static_cast<uint8_t>(yEnd >> 8), static_cast<uint8_t>(yEnd),
+                             1};
   bus.cmd(CMD_PARTIAL_IN);
   bus.cmdData(CMD_PARTIAL_WINDOW, window, sizeof(window));
 }
@@ -167,6 +177,7 @@ void Uc8253X3Driver::begin(EpdBus& bus) {
   _absoluteInput = false;
   _directGrayPass = false;
   _directGrayOnPanel = false;
+  _gray16CleanupActive = false;
   initController(bus);
 }
 
@@ -241,8 +252,10 @@ void Uc8253X3Driver::display(EpdBus& bus, const uint8_t* fb, const uint8_t* prev
 
   uint8_t postConditionPasses = 0;
   if (doFullSync) {
-    if (forcedFullSync) postConditionPasses = _forcedConditionPassesNext;
-    else if (_initialFullSyncsRemaining == 1) postConditionPasses = 1;
+    if (forcedFullSync)
+      postConditionPasses = _forcedConditionPassesNext;
+    else if (_initialFullSyncsRemaining == 1)
+      postConditionPasses = 1;
   }
   if (postConditionPasses > 0) {
     const uint16_t xEnd = static_cast<uint16_t>(_w - 1);
@@ -269,6 +282,7 @@ void Uc8253X3Driver::display(EpdBus& bus, const uint8_t* fb, const uint8_t* prev
   // cleanBaseNeeded on forever.
   _grayState.lsbValid = false;
   _redRamSynced = true;
+  _gray16CleanupActive = false;
 
   // First differential after a full garbles on X3; spend a no-op fast settle of
   // the just-displayed frame so the caller's next diff is clean.
@@ -288,7 +302,7 @@ void Uc8253X3Driver::display(EpdBus& bus, const uint8_t* fb, const uint8_t* prev
 }
 
 void Uc8253X3Driver::beginGrayscale(EpdBus& bus, const uint8_t* fb, GrayscaleMode mode, RefreshMode fallback,
-                                   bool turnOff) {
+                                    bool turnOff) {
   if (mode == GrayscaleMode::Direct && _cfg.directGray) {
     // Stage complete planes before the only display activation. No B/W image is
     // shown.
@@ -331,13 +345,21 @@ void Uc8253X3Driver::displayGrayscaleBase(EpdBus& bus, const uint8_t* fb, Refres
   const bool cleanBaseNeeded =
       !_redRamSynced || _grayState.lsbValid || _forceFullSyncNext || _initialFullSyncsRemaining > 0;
   if (cleanBaseNeeded) {
+    _gray16CleanupActive = false;
     display(bus, fb, nullptr, fallback, /*turnOff=*/false);
     loadBankCdi(bus, 0xA9, 0x07, _cfg.preBwMid);
     triggerRefresh(bus, turnOff);
     return;
   }
+  const bool fromGray16Cleanup = _gray16CleanupActive && supportsGray16();
+  _gray16CleanupActive = false;
+  if (fromGray16Cleanup) {
+    const uint8_t pllBase = static_cast<uint8_t>(_cfg.lut16.pllBase & 0x0Fu);
+    bus.cmdData(CMD_PLL_CONTROL, &pllBase, 1);
+    bus.cmdData(CMD_POWER_SETTING, x3_lut16::kPwrStandard, sizeof(x3_lut16::kPwrStandard));
+  }
   bus.sendPlaneFlipped(CMD_DTM2, fb, _h, _wb);
-  loadBankCdi(bus, 0xA9, 0x07, _cfg.preBwMid);
+  loadBankCdi(bus, 0xA9, 0x07, fromGray16Cleanup ? _cfg.lut16.preBwMid : _cfg.preBwMid);
   triggerRefresh(bus, turnOff);
   // Keep the driver invariant that DTM1 mirrors the displayed frame; the gray
   // plane writes that normally follow overwrite both planes anyway.
@@ -363,6 +385,10 @@ void Uc8253X3Driver::preconditionGrayscale(EpdBus& bus, uint16_t x, uint16_t y, 
   // bank is still loaded — firing the mid bank's strong BW/WB drives against
   // gray-coded state pairs would corrupt the region.
   if (_inGrayscaleMode || !_redRamSynced || _grayState.lsbValid) return;
+  _gray16CleanupActive = false;
+  const uint8_t pllBase = static_cast<uint8_t>(_cfg.lut16.pllBase & 0x0Fu);
+  bus.cmdData(CMD_PLL_CONTROL, &pllBase, 1);
+  bus.cmdData(CMD_POWER_SETTING, x3_lut16::kPwrStandard, sizeof(x3_lut16::kPwrStandard));
   const uint16_t xEndLogical = static_cast<uint16_t>(((x + w - 1) < (_w - 1)) ? (x + w - 1) : (_w - 1));
   const uint16_t yEndLogical = static_cast<uint16_t>(((y + h - 1) < (_h - 1)) ? (y + h - 1) : (_h - 1));
   const uint16_t xs = static_cast<uint16_t>(x & ~7u);
@@ -399,14 +425,13 @@ void Uc8253X3Driver::copyGrayscaleLsb(EpdBus& bus, const uint8_t* lsb) {
   _grayState.lsbValid = true;
 }
 
-void Uc8253X3Driver::copyGrayscaleMsb(EpdBus &bus, const uint8_t *msb) {
-  if (!msb || !_grayState.lsbValid)
-    return;
+void Uc8253X3Driver::copyGrayscaleMsb(EpdBus& bus, const uint8_t* msb) {
+  if (!msb || !_grayState.lsbValid) return;
   if (_directGrayPass) {
     writeGrayscalePlaneStrip(bus, GrayPlane::Msb, msb, 0, _h);
     return;
   }
-  bus.sendPlaneFlipped(CMD_DTM2, msb, _h, _wb); // MSB plane -> "new" RAM
+  bus.sendPlaneFlipped(CMD_DTM2, msb, _h, _wb);  // MSB plane -> "new" RAM
   bus.cmd(CMD_DATA_STOP);
 }
 
@@ -487,11 +512,82 @@ void Uc8253X3Driver::displayGray(EpdBus& bus, const uint8_t* fb, bool turnOff, c
   triggerRefresh(bus, turnOff);
 
   _redRamSynced = false;
+  _gray16CleanupActive = false;
   _forceFullSyncNext = false;
   _forcedConditionPassesNext = 0;
   _grayState.lsbValid = false;
   _absoluteInput = false;
   _directGrayPass = false;
+}
+
+void Uc8253X3Driver::displayGray16Pass1(EpdBus& bus) {
+  if (!supportsGray16() || !_grayState.lsbValid) return;
+  const uint8_t pllPass1 = static_cast<uint8_t>(_cfg.lut16.pllPass1 & 0x0Fu);
+  const uint8_t pllBase = static_cast<uint8_t>(_cfg.lut16.pllBase & 0x0Fu);
+  bus.cmdData(CMD_PLL_CONTROL, &pllPass1, 1);
+  loadBankCdi(bus, 0x29, 0x07, _cfg.lut16.pass1Coarse);
+  triggerRefresh(bus, /*turnOff=*/false);
+  bus.cmdData(CMD_PLL_CONTROL, &pllBase, 1);
+  _inGrayscaleMode = true;
+  _redRamSynced = false;
+  _gray16CleanupActive = false;
+  _grayState.lsbValid = false;
+}
+
+void Uc8253X3Driver::displayGray16Pass2(EpdBus& bus, bool turnOff) {
+  if (!supportsGray16() || !_grayState.lsbValid) return;
+  const uint8_t pllPass2 = static_cast<uint8_t>(_cfg.lut16.pllPass2 & 0x0Fu);
+  const uint8_t vdlPass2 = static_cast<uint8_t>(_cfg.lut16.vdlPass2 & 0x3Fu);
+  const uint8_t pwrPass2[5] = {0x07, 0x17, 0x3F, vdlPass2, 0x17};
+  bus.cmdData(CMD_PLL_CONTROL, &pllPass2, 1);
+  bus.cmdData(CMD_POWER_SETTING, pwrPass2, sizeof(pwrPass2));
+  loadBankCdi(bus, 0x29, 0x07, _cfg.lut16.pass2Fine);
+  triggerRefresh(bus, /*turnOff=*/false);
+
+  // Restore standard 80 Hz PLL and +/-15.0V rails before optional rail power-down.
+  const uint8_t pllBase = static_cast<uint8_t>(_cfg.lut16.pllBase & 0x0Fu);
+  bus.cmdData(CMD_PLL_CONTROL, &pllBase, 1);
+  bus.cmdData(CMD_POWER_SETTING, x3_lut16::kPwrStandard, sizeof(x3_lut16::kPwrStandard));
+  if (turnOff && _isScreenOn) {
+    bus.cmd(CMD_POWER_OFF);
+    bus.waitBusy(" X3_POF");
+    _isScreenOn = false;
+  }
+
+  _inGrayscaleMode = true;
+  _redRamSynced = false;
+  _gray16CleanupActive = false;
+  _grayState.lsbValid = false;
+  _forceFullSyncNext = false;
+  _forcedConditionPassesNext = 0;
+  _absoluteInput = false;
+  _directGrayPass = false;
+}
+
+void Uc8253X3Driver::beginGray16Cleanup(EpdBus& bus, const uint8_t* bw) {
+  _absoluteInput = false;
+  _directGrayPass = false;
+  _grayState.lsbValid = false;
+  _gray16CleanupActive = false;
+  if (!bw) {
+    _redRamSynced = false;
+    return;
+  }
+  // Write full BW plane to DTM2 (0x13 + DATA_STOP); caller then streams
+  // GRAY16_CLEANUP_DTM1 strips into DTM1 and calls finishGray16Cleanup().
+  bus.sendPlaneFlipped(CMD_DTM2, bw, _h, _wb);
+  bus.cmd(CMD_DATA_STOP);
+  _redRamSynced = false;
+}
+
+void Uc8253X3Driver::finishGray16Cleanup(EpdBus& bus) {
+  bus.cmd(CMD_DATA_STOP);
+  _grayState.lsbValid = false;
+  _inGrayscaleMode = false;
+  _redRamSynced = true;
+  _gray16CleanupActive = supportsGray16();
+  _forceFullSyncNext = false;
+  _forcedConditionPassesNext = 0;
 }
 
 void Uc8253X3Driver::cleanupGrayscaleBuffers(EpdBus& bus, const uint8_t* bw) {
@@ -521,6 +617,7 @@ void Uc8253X3Driver::cleanupGrayscaleBuffers(EpdBus& bus, const uint8_t* bw) {
   // cleanBaseNeeded on in steady state.
   _grayState.lsbValid = false;
   _redRamSynced = true;
+  _gray16CleanupActive = false;
   _forceFullSyncNext = false;
   _forcedConditionPassesNext = 0;
   _inGrayscaleMode = false;
@@ -530,6 +627,9 @@ void Uc8253X3Driver::grayscaleRevert(EpdBus& bus, const uint8_t* fb) {
   (void)fb;
   if (!_inGrayscaleMode) return;
   _inGrayscaleMode = false;
+  const uint8_t pllBase = static_cast<uint8_t>(_cfg.lut16.pllBase & 0x0Fu);
+  bus.cmdData(CMD_PLL_CONTROL, &pllBase, 1);
+  bus.cmdData(CMD_POWER_SETTING, x3_lut16::kPwrStandard, sizeof(x3_lut16::kPwrStandard));
   // Scrub to clean white: both planes white + the _half scrub bank (CDI 0xA9).
   bus.fillPlane(CMD_DTM1, 0xFF, _h, _wb);
   bus.cmd(CMD_DATA_STOP);
@@ -542,12 +642,14 @@ void Uc8253X3Driver::grayscaleRevert(EpdBus& bus, const uint8_t* fb) {
   // path every page.
   _grayState.lsbValid = false;
   _redRamSynced = true;
+  _gray16CleanupActive = false;
 }
 
 void Uc8253X3Driver::requestResync(uint8_t settlePasses) {
   _grayState = {};
   _absoluteInput = false;
   _directGrayPass = false;
+  _gray16CleanupActive = false;
   _forceFullSyncNext = true;
   _forcedConditionPassesNext = settlePasses;
 }
@@ -557,10 +659,18 @@ void Uc8253X3Driver::skipInitialResync() {
   _redRamSynced = true;
 }
 
+void Uc8253X3Driver::powerOffBetweenFrames(EpdBus& bus) {
+  if (!_isScreenOn) return;
+  bus.cmd(CMD_POWER_OFF);
+  bus.waitBusy(" X3_POF");
+  _isScreenOn = false;
+}
+
 void Uc8253X3Driver::deepSleep(EpdBus& bus) {
   _grayState = {};
   _absoluteInput = false;
   _directGrayPass = false;
+  _gray16CleanupActive = false;
   if (_isScreenOn) {
     bus.cmd(CMD_POWER_OFF);
     bus.waitBusy(" X3 power-down");

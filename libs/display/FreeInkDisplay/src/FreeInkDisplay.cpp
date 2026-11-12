@@ -645,12 +645,10 @@ void FreeInkDisplay::syncPendingAsync() {
 }
 
 void FreeInkDisplay::powerOffBetweenFrames() {
-#if FREEINK_DEVICE_PICCO
-  if (!_driver || !BoardConfig::isPicco()) return;
+  if (!_driver) return;
   DisplayPmLock pmLock;
   waitRefreshComplete();
   _driver->powerOffBetweenFrames(_bus);
-#endif
 }
 
 bool FreeInkDisplay::supportsAsyncRefresh() const {
@@ -968,7 +966,7 @@ bool FreeInkDisplay::displayGrayscaleBase(GrayscaleMode mode, RefreshMode fallba
   const auto caps = grayscaleCapabilities(mode);
   if (!caps.supported()) return false;
   if (_inversionDirty && (mode == GrayscaleMode::Overlay || caps.base == GrayscaleBase::Separate))
-    displayBuffer(fallback, turnOffScreen);
+    displayBuffer(fallback, false);
   DisplayPmLock pmLock;
   syncPendingAsync();
   _shadowValid = false;
@@ -982,8 +980,18 @@ bool FreeInkDisplay::displayGrayscaleBase(GrayscaleMode mode, RefreshMode fallba
 void FreeInkDisplay::displayGrayscaleBase(RefreshMode fallback, bool turnOffScreen) {
   cancelGrayscalePass();
   _grayPassFailed = false;
-  if (_inverted || _inversionDirty) {
+  if (_inverted) {
     displayBuffer(fallback, turnOffScreen);
+    return;
+  }
+  if (_inversionDirty) {
+    displayBuffer(fallback == FULL_REFRESH ? FULL_REFRESH : HALF_REFRESH, false);
+    if (_driver) {
+      DisplayPmLock pmLock;
+      syncPendingAsync();
+      _driver->preconditionGrayscale(_bus, 0, 0, getDisplayWidth(), getDisplayHeight());
+      if (turnOffScreen) _driver->powerOffBetweenFrames(_bus);
+    }
     return;
   }
   DisplayPmLock pmLock;
@@ -1086,6 +1094,45 @@ void FreeInkDisplay::cleanupGrayscaleBuffers(const uint8_t* bwBuffer) {
   // rather than the stale LSB/MSB grayscale plane data that was there before.
   if (frameBuffer && bwBuffer && frameBuffer != bwBuffer) memcpy(frameBuffer, bwBuffer, bufferSize);
 }
+
+bool FreeInkDisplay::supportsGray16() const { return !_inverted && _driver != nullptr && _driver->supportsGray16(); }
+
+void FreeInkDisplay::displayGray16Pass1() {
+  if (_inverted || !_driver) return;
+  DisplayPmLock pmLock;
+  syncPendingAsync();
+  _shadowValid = false;
+  _redRamSynced = false;
+  _driver->displayGray16Pass1(_bus);
+}
+
+void FreeInkDisplay::displayGray16Pass2(bool turnOffScreen) {
+  if (_inverted || !_driver) return;
+  DisplayPmLock pmLock;
+  syncPendingAsync();
+  _shadowValid = false;
+  _redRamSynced = false;
+  _driver->displayGray16Pass2(_bus, turnOffScreen);
+}
+
+void FreeInkDisplay::beginGray16Cleanup(const uint8_t* bwBuffer) {
+  cancelGrayscalePass();
+  DisplayPmLock pmLock;
+  syncPendingAsync();
+  if (!_inverted && _driver) {
+    _driver->beginGray16Cleanup(_bus, bwBuffer);
+  }
+  if (frameBuffer && bwBuffer && frameBuffer != bwBuffer) memcpy(frameBuffer, bwBuffer, bufferSize);
+}
+
+void FreeInkDisplay::finishGray16Cleanup() {
+  if (_inverted || !_driver) return;
+  DisplayPmLock pmLock;
+  syncPendingAsync();
+  _driver->finishGray16Cleanup(_bus);
+}
+
+bool FreeInkDisplay::isGray16CleanupActive() const { return _driver != nullptr && _driver->isGray16CleanupActive(); }
 #ifndef EINK_DISPLAY_SINGLE_BUFFER_MODE
 void FreeInkDisplay::cleanupGrayscaleWithPreviousBuffer() {
   cancelGrayscalePass();

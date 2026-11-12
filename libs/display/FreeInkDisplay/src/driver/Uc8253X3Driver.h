@@ -15,32 +15,11 @@
 //
 // X3TwoPhase BUSY; SPI clock board-overridable (default 16 MHz).
 
+#include <Uc8253X3Config.h>
+
 #include "PanelDriver.h"
 
 namespace freeink {
-
-// One UC8253 waveform bank: VCOM + the four transition LUTs.
-struct Uc8253LutBank {
-  const uint8_t* vcom;
-  const uint8_t* ww;
-  const uint8_t* bw;
-  const uint8_t* wb;
-  const uint8_t* bb;
-};
-
-struct Uc8253X3Config {
-  Uc8253LutBank normal;    // condition-pass / settle (CDI 0xA9)
-  Uc8253LutBank half;      // scrub (CDI 0xA9)
-  Uc8253LutBank fast;      // turbo differential (CDI 0x29)
-  Uc8253LutBank full;      // OEM full / factory (CDI 0x29)
-  Uc8253LutBank gc;        // OEM 4-level grayscale nudge (CDI 0x29)
-  Uc8253LutBank preBwMid;  // OEM grayscale preconditioning settle (CDI 0xA9)
-  uint8_t lutLen;          // bytes per LUT sent to the controller (42)
-  const Uc8253LutBank *directGray =
-      nullptr; // optional direct grayscale waveform
-};
-
-const Uc8253X3Config& uc8253X3DefaultConfig();
 
 class Uc8253X3Driver : public PanelDriver {
  public:
@@ -53,43 +32,48 @@ class Uc8253X3Driver : public PanelDriver {
 
   void begin(EpdBus& bus) override;
   void deepSleep(EpdBus& bus) override;
+  void powerOffBetweenFrames(EpdBus& bus) override;
 
   void display(EpdBus& bus, const uint8_t* fb, const uint8_t* prev, RefreshMode mode, bool turnOff) override;
-  void beginGrayscale(EpdBus &bus, const uint8_t *fb, GrayscaleMode mode,
-                            RefreshMode fallback, bool turnOff) override;
-  void displayGrayscaleBase(EpdBus &bus, const uint8_t *fb,
-                                  RefreshMode fallback, bool turnOff) override;
-  void preconditionGrayscale(EpdBus &bus, uint16_t x, uint16_t y, uint16_t w,
-                             uint16_t h) override;
-  GrayscaleCapabilities grayscaleCapabilities(
-      GrayscaleMode mode = GrayscaleMode::Overlay) const override {
+  void beginGrayscale(EpdBus& bus, const uint8_t* fb, GrayscaleMode mode, RefreshMode fallback, bool turnOff) override;
+  void displayGrayscaleBase(EpdBus& bus, const uint8_t* fb, RefreshMode fallback, bool turnOff) override;
+  void preconditionGrayscale(EpdBus& bus, uint16_t x, uint16_t y, uint16_t w, uint16_t h) override;
+  GrayscaleCapabilities grayscaleCapabilities(GrayscaleMode mode = GrayscaleMode::Overlay) const override {
     if (mode == GrayscaleMode::Direct && !_cfg.directGray) return {};
     if (mode == GrayscaleMode::Absolute || mode == GrayscaleMode::Direct)
       return {GrayscaleEncoding::AbsolutePlanes,
-              mode == GrayscaleMode::Direct ? GrayscaleBase::Combined : GrayscaleBase::Separate,
-              true, false, false};
+              mode == GrayscaleMode::Direct ? GrayscaleBase::Combined : GrayscaleBase::Separate, true, false, false};
     if (mode != GrayscaleMode::Overlay) return {};
-    return {GrayscaleEncoding::OverlayMasks, GrayscaleBase::Separate, true,
-            false, false};
+    return {GrayscaleEncoding::OverlayMasks, GrayscaleBase::Separate, true, false, false};
   }
   void copyGrayscaleLsb(EpdBus& bus, const uint8_t* lsb) override;
   void copyGrayscaleMsb(EpdBus& bus, const uint8_t* msb) override;
   void writeGrayscalePlaneStrip(EpdBus& bus, GrayPlane plane, const uint8_t* rows, uint16_t yStart,
                                 uint16_t numRows) override;
   void displayGray(EpdBus& bus, const uint8_t* fb, bool turnOff, const unsigned char* lut, bool factoryMode) override;
+  bool supportsGray16() const override {
+    return hasLutBank(_cfg.lut16.preBwMid) && hasLutBank(_cfg.lut16.pass1Coarse) && hasLutBank(_cfg.lut16.pass2Fine);
+  }
+  void displayGray16Pass1(EpdBus& bus) override;
+  void displayGray16Pass2(EpdBus& bus, bool turnOff) override;
+  void beginGray16Cleanup(EpdBus& bus, const uint8_t* bw) override;
+  void finishGray16Cleanup(EpdBus& bus) override;
+  bool isGray16CleanupActive() const override { return _gray16CleanupActive; }
   void cleanupGrayscaleBuffers(EpdBus& bus, const uint8_t* bw) override;
   void grayscaleRevert(EpdBus& bus, const uint8_t* fb) override;
 
   void requestResync(uint8_t settlePasses) override;
   void skipInitialResync() override;
 
-private:
-  void initController(EpdBus &bus);
-  void loadBank(EpdBus &bus, const Uc8253LutBank &bank);
-  void loadBankCdi(EpdBus &bus, uint8_t cdi0, uint8_t cdi1,
-                   const Uc8253LutBank &bank);
-  void triggerRefresh(EpdBus &bus, bool turnOff, const char *label = " X3_DRF");
-  void grayWindowIn(EpdBus &bus);
+ private:
+  static constexpr bool hasLutBank(const Uc8253LutBank& bank) {
+    return bank.vcom != nullptr && bank.ww != nullptr && bank.bw != nullptr && bank.wb != nullptr && bank.bb != nullptr;
+  }
+  void initController(EpdBus& bus);
+  void loadBank(EpdBus& bus, const Uc8253LutBank& bank);
+  void loadBankCdi(EpdBus& bus, uint8_t cdi0, uint8_t cdi1, const Uc8253LutBank& bank);
+  void triggerRefresh(EpdBus& bus, bool turnOff, const char* label = " X3_DRF");
+  void grayWindowIn(EpdBus& bus);
 
   const Uc8253X3Config& _cfg;
 
@@ -104,6 +88,7 @@ private:
   bool _absoluteInput = false;
   bool _directGrayPass = false;
   bool _directGrayOnPanel = false;
+  bool _gray16CleanupActive = false;
   uint8_t _initialFullSyncsRemaining = 0;
   bool _forceFullSyncNext = false;
   uint8_t _forcedConditionPassesNext = 0;

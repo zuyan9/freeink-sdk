@@ -189,6 +189,16 @@ class PanelDriver {
     (void)factoryMode;
     display(bus, fb, nullptr, RefreshMode::Fast, turnOff);
   }
+  // Two-pass 16-gray refresh and differential DTM1 cleanup (UC8253 X3).
+  virtual bool supportsGray16() const { return false; }
+  virtual void displayGray16Pass1(EpdBus& bus) { (void)bus; }
+  virtual void displayGray16Pass2(EpdBus& bus, bool turnOff) {
+    (void)bus;
+    (void)turnOff;
+  }
+  virtual void beginGray16Cleanup(EpdBus& bus, const uint8_t* bw) { cleanupGrayscaleBuffers(bus, bw); }
+  virtual void finishGray16Cleanup(EpdBus& bus) { (void)bus; }
+  virtual bool isGray16CleanupActive() const { return false; }
   // Diagnostic four-gray comparison. The full frame is first rendered with
   // the controller's flashing OTP waveform; `custom*` is then rebuilt with the
   // driver's non-flashing grayscale path. Default drivers keep the OTP frame.

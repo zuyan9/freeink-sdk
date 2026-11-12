@@ -153,6 +153,13 @@ class FreeInkDisplay {
   // grayscale. Available in both buffer modes (CrossPoint's dual-buffer HAL
   // wraps it directly).
   void cleanupGrayscaleBuffers(const uint8_t* bwBuffer);
+  // Two-pass 16-gray refresh and differential DTM1 cleanup (UC8253 X3).
+  bool supportsGray16() const;
+  void displayGray16Pass1();
+  void displayGray16Pass2(bool turnOffScreen = false);
+  void beginGray16Cleanup(const uint8_t* bwBuffer);
+  void finishGray16Cleanup();
+  bool isGray16CleanupActive() const;
 #ifndef EINK_DISPLAY_SINGLE_BUFFER_MODE
   // Restore controller RAM and frameBuffer to the BW baseline after grayscale.
   // frameBufferActive is the only valid source: the caller is always inside a
@@ -197,9 +204,9 @@ class FreeInkDisplay {
   // can skip overlap scaffolding (e.g. whole-plane grayscale buffers) when
   // there is nothing to overlap.
   bool supportsAsyncRefresh() const;
-  // End-of-frame idle power policy, currently Picco only. Call under the same
-  // bus/render lock as drawing, after ALL grayscale uploads and cleanup.
-  // Completes pending refreshes, then powers down analog circuitry, not RAM.
+  // End-of-frame idle power-down. Call under the same bus/render lock as
+  // drawing, after all grayscale uploads and cleanup. Completes pending
+  // refreshes, then powers down analog circuitry while retaining controller RAM.
   void powerOffBetweenFrames();
   // True when the selected driver can use an ordinary deferred B/W refresh as
   // the base for a following grayscale pass.
